@@ -545,7 +545,7 @@ function seatmapAreaEl(area, showLabel) {
   for (const row of area.rows || []) {
     const rowEl = document.createElement('div');
     rowEl.className = 'seat-row';
-    rowEl.style.gridTemplateColumns = `24px repeat(${columnCount}, minmax(12px, 1fr))`;
+    rowEl.style.gridTemplateColumns = `24px repeat(${columnCount}, var(--seat-size, 20px))`;
 
     const label = document.createElement('span');
     label.className = 'row-label';
