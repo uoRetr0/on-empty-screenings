@@ -14,6 +14,7 @@ class FakeElement {
     this.style = {};
     this.listeners = new Map();
     this.attributes = new Map();
+    this.parent = null;
     this.classList = {
       add: (className) => {
         this.className = sortedClassName(`${this.className} ${className}`);
@@ -33,11 +34,34 @@ class FakeElement {
   }
 
   append(...children) {
+    for (const child of children) {
+      if (child instanceof FakeElement) {
+        child.parent = this;
+      }
+    }
     this.children.push(...children);
   }
 
   replaceChildren(...children) {
+    for (const child of children) {
+      if (child instanceof FakeElement) {
+        child.parent = this;
+      }
+    }
     this.children = children;
+  }
+
+  after(node) {
+    node.parent = this.parent;
+    const index = this.parent.children.indexOf(this);
+    this.parent.children.splice(index + 1, 0, node);
+  }
+
+  remove() {
+    const index = this.parent ? this.parent.children.indexOf(this) : -1;
+    if (index >= 0) {
+      this.parent.children.splice(index, 1);
+    }
   }
 
   setAttribute(name, value) {
@@ -86,224 +110,7 @@ class FakeDocument {
   }
 }
 
-test('city selection is not reset when async city options finish loading', async () => {
-  let resolveFetch;
-  const fetchPromise = new Promise((resolve) => {
-    resolveFetch = resolve;
-  });
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  form.elements = { city, date, threshold, cineplex, movie };
-
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, new FakeElement(), new FakeElement()),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.value = value;
-      }
-    },
-    fetch() {
-      return fetchPromise;
-    }
-  });
-
-  city.value = 'toronto';
-  city.dispatch('change');
-
-  resolveFetch({
-    ok: true,
-    async json() {
-      return {
-        defaultCity: 'ottawa',
-        cities: [
-          { slug: 'ottawa', label: 'Ottawa' },
-          { slug: 'toronto', label: 'Toronto' }
-        ]
-      };
-    }
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.equal(city.value, 'toronto');
-});
-
-test('static city fallback keeps default cities when generated data is partial', async () => {
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  form.elements = { city, date, threshold, cineplex, movie };
-
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, new FakeElement(), new FakeElement()),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.value = value;
-      }
-    },
-    fetch(url) {
-      if (String(url) === 'api/cities') {
-        return Promise.resolve({
-          ok: false,
-          async json() {
-            return { error: 'Not found' };
-          }
-        });
-      }
-
-      if (String(url) === 'data/index.json') {
-        return Promise.resolve({
-          ok: true,
-          async json() {
-            return { dates: [{ city: 'ottawa', date: '2026-05-24' }] };
-          }
-        });
-      }
-
-      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
-    }
-  });
-
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.ok(city.options.some((option) => option.value === 'ottawa'));
-  assert.equal(city.options.some((option) => option.value === 'barrhaven'), false);
-  assert.ok(city.options.some((option) => option.value === 'toronto'));
-  assert.ok(city.options.some((option) => option.value === 'london'));
-  assert.equal(date.min, '2026-05-24');
-  assert.equal(date.max, '2026-05-24');
-});
-
-test('initial city loading does not scan screenings automatically', async () => {
-  const requestedUrls = [];
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  form.elements = { city, date, threshold, cineplex, movie };
-
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, new FakeElement(), new FakeElement()),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.value = value;
-      }
-    },
-    fetch(url) {
-      requestedUrls.push(String(url));
-      return Promise.resolve({
-        ok: true,
-        async json() {
-          return {
-            defaultCity: 'ottawa',
-            cities: [
-              { slug: 'ottawa', label: 'Ottawa' },
-              { slug: 'toronto', label: 'Toronto' }
-            ]
-          };
-        }
-      });
-    }
-  });
-
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.deepEqual(requestedUrls, ['api/cities']);
-  assert.ok(cineplex.options.some((option) => option.value === 'Cineplex Odeon Barrhaven Cinemas'));
-  assert.ok(cineplex.options.some((option) => option.value === 'Cineplex Cinemas Ottawa'));
-});
-
-test('changing city waits for refresh before loading screenings', async () => {
-  const requestedUrls = [];
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  form.elements = { city, date, threshold, cineplex, movie };
-
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, new FakeElement(), new FakeElement()),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.value = value;
-      }
-    },
-    fetch(url) {
-      requestedUrls.push(String(url));
-      if (String(url) === 'api/cities') {
-        return Promise.resolve({
-          ok: true,
-          async json() {
-            return {
-              defaultCity: 'ottawa',
-              cities: [
-                { slug: 'ottawa', label: 'Ottawa' },
-                { slug: 'toronto', label: 'Toronto' }
-              ]
-            };
-          }
-        });
-      }
-
-      return Promise.resolve({
-        ok: true,
-        async json() {
-          return { showings: [] };
-        }
-      });
-    }
-  });
-
-  await new Promise((resolve) => setImmediate(resolve));
-  city.value = 'toronto';
-  city.dispatch('change');
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(requestedUrls.some((url) => url.startsWith('api/showings?city=toronto&')), false);
-
-  form.dispatch('submit');
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.ok(requestedUrls.some((url) => url.startsWith('api/showings?city=toronto&')));
-  assert.ok(cineplex.options.some((option) => option.value === 'Scotiabank Theatre Toronto'));
-  assert.equal(cineplex.options.some((option) => option.value === 'Cineplex Odeon Barrhaven Cinemas'), false);
-  assert.equal(cineplex.disabled, false);
-});
-
-test('any occupied toggle shows screenings above the max occupied value', async () => {
+async function boot(fetchImpl) {
   const form = new FakeElement();
   const city = new FakeSelect();
   const date = new FakeElement();
@@ -313,339 +120,10 @@ test('any occupied toggle shows screenings above the max occupied value', async 
   const movie = new FakeSelect();
   const status = new FakeElement();
   const showings = new FakeElement();
-  threshold.value = '0';
   form.elements = { city, date, threshold, anyOccupied, cineplex, movie };
 
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, status, showings),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.value = value;
-      }
-    },
-    fetch(url) {
-      if (String(url) === 'api/cities') {
-        return Promise.resolve({
-          ok: true,
-          async json() {
-            return {
-              defaultCity: 'ottawa',
-              cities: [{ slug: 'ottawa', label: 'Ottawa' }]
-            };
-          }
-        });
-      }
-
-      return Promise.resolve({
-        ok: true,
-        async json() {
-          return {
-            showings: [
-              {
-                theatreName: 'Cineplex Cinemas Ottawa',
-                city: 'Ottawa',
-                movieTitle: 'Empty Movie',
-                startLocal: '2026-05-23T19:00:00',
-                auditorium: '1',
-                experienceTypes: ['Regular'],
-                occupiedCount: 0,
-                totalSeats: 100
-              },
-              {
-                theatreName: 'Cineplex Cinemas Ottawa',
-                city: 'Ottawa',
-                movieTitle: 'Busy Movie',
-                startLocal: '2026-05-23T21:00:00',
-                auditorium: '2',
-                experienceTypes: ['Regular'],
-                occupiedCount: 8,
-                totalSeats: 100
-              }
-            ]
-          };
-        }
-      });
-    }
-  });
-
-  await new Promise((resolve) => setImmediate(resolve));
-  form.dispatch('submit');
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(status.textContent, '1 found across 1 Cineplex theatres');
-
-  anyOccupied.checked = true;
-  anyOccupied.dispatch('change');
-  assert.equal(status.textContent, '2 found across 1 Cineplex theatres');
-});
-
-test('choose a scan message is rendered without the empty-state card chrome', async () => {
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  const showings = new FakeElement();
-  form.elements = { city, date, threshold, cineplex, movie };
-
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, new FakeElement(), showings),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.value = value;
-      }
-    },
-    fetch() {
-      return Promise.resolve({
-        ok: true,
-        async json() {
-          return { defaultCity: 'ottawa', cities: [{ slug: 'ottawa', label: 'Ottawa' }] };
-        }
-      });
-    }
-  });
-
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.equal(showings.children[0].className, 'empty-state empty-state--plain');
-});
-
-test('failed refresh keeps previous movie options and shows an error card', async () => {
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  const status = new FakeElement();
-  const showings = new FakeElement();
-  let failShowings = false;
-  form.elements = { city, date, threshold, cineplex, movie };
-
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, status, showings),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.textContent = label;
-        this.value = value;
-      }
-    },
-    fetch(url) {
-      if (String(url) === 'api/cities') {
-        return Promise.resolve({
-          ok: true,
-          async json() {
-            return { defaultCity: 'ottawa', cities: [{ slug: 'ottawa', label: 'Ottawa' }] };
-          }
-        });
-      }
-
-      if (failShowings) {
-        return Promise.resolve({
-          ok: false,
-          async json() {
-            return { error: 'Cineplex data could not be reached' };
-          }
-        });
-      }
-
-      return Promise.resolve({
-        ok: true,
-        async json() {
-          return {
-            showings: [
-              {
-                theatreName: 'Cineplex Cinemas Ottawa',
-                city: 'Ottawa',
-                movieTitle: 'Quiet Movie',
-                startLocal: '2026-05-23T19:00:00',
-                auditorium: '1',
-                experienceTypes: ['Regular'],
-                occupiedCount: 0,
-                totalSeats: 100
-              }
-            ]
-          };
-        }
-      });
-    }
-  });
-
-  await new Promise((resolve) => setImmediate(resolve));
-  form.dispatch('submit');
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(movie.disabled, false);
-  assert.equal(movie.options.some((option) => option.value === 'Quiet Movie'), true);
-
-  failShowings = true;
-  date.value = '2026-05-24';
-  date.dispatch('change');
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(status.textContent, '1 shown from previous results. Press Refresh for selected city/date.');
-
-  form.dispatch('submit');
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.equal(movie.disabled, false);
-  assert.equal(movie.options.some((option) => option.value === 'Quiet Movie'), true);
-  assert.equal(status.textContent, 'Error loading new scan');
-  assert.equal(showings.children[0].children[0].className, 'empty-state empty-state--error');
-});
-
-test('static deployment shows unavailable dates without an error card', async () => {
-  const requestedUrls = [];
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  const status = new FakeElement();
-  const showings = new FakeElement();
-  form.elements = { city, date, threshold, cineplex, movie };
-
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, status, showings),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.textContent = label;
-        this.value = value;
-      }
-    },
-    fetch(url) {
-      requestedUrls.push(String(url));
-      if (String(url) === 'api/cities') {
-        return Promise.resolve({
-          ok: false,
-          async json() {
-            return { error: 'Not found' };
-          }
-        });
-      }
-
-      if (String(url) === 'data/index.json') {
-        return Promise.resolve({
-          ok: true,
-          async json() {
-            return { dates: [{ city: 'ottawa', date: '2026-05-24' }] };
-          }
-        });
-      }
-
-      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
-    }
-  });
-
-  await new Promise((resolve) => setImmediate(resolve));
-  city.value = 'ottawa';
-  date.value = '2026-05-25';
-  form.dispatch('submit');
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.equal(requestedUrls.some((url) => url.startsWith('api/showings?')), false);
-  assert.equal(requestedUrls.some((url) => url.startsWith('data/showings-')), false);
-  assert.equal(status.textContent, 'No saved scan for selected date');
-  assert.equal(showings.children[0].className, 'empty-state');
-  assert.equal(showings.children[0].children[0].textContent, 'No saved scan for this date yet');
-});
-
-test('manual refreshes request a fresh scan', async () => {
-  const requestedUrls = [];
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  form.elements = { city, date, threshold, cineplex, movie };
-
-  vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), {
-    document: new FakeDocument(form, new FakeElement(), new FakeElement()),
-    Intl,
-    Date,
-    AbortController,
-    URLSearchParams,
-    Option: class {
-      constructor(label, value) {
-        this.label = label;
-        this.text = label;
-        this.value = value;
-      }
-    },
-    fetch(url) {
-      requestedUrls.push(String(url));
-      if (String(url) === 'api/cities') {
-        return Promise.resolve({
-          ok: true,
-          async json() {
-            return {
-              defaultCity: 'ottawa',
-              cities: [
-                { slug: 'ottawa', label: 'Ottawa' },
-                { slug: 'toronto', label: 'Toronto' }
-              ]
-            };
-          }
-        });
-      }
-
-      return Promise.resolve({
-        ok: true,
-        async json() {
-          return { showings: [] };
-        }
-      });
-    }
-  });
-
-  await new Promise((resolve) => setImmediate(resolve));
-  city.value = 'toronto';
-  city.dispatch('change');
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(requestedUrls.some((url) => url.startsWith('api/showings?city=toronto&')), false);
-
-  form.dispatch('submit');
-  await new Promise((resolve) => setImmediate(resolve));
-  form.dispatch('submit');
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.equal(requestedUrls.filter((url) => url.startsWith('api/showings?city=toronto&')).length, 2);
-});
-
-test('auditorium labels use a short AUD prefix', async () => {
-  const form = new FakeElement();
-  const city = new FakeSelect();
-  const date = new FakeElement();
-  const threshold = new FakeElement();
-  const cineplex = new FakeSelect();
-  const movie = new FakeSelect();
-  form.elements = { city, date, threshold, cineplex, movie };
   const context = {
-    document: new FakeDocument(form, new FakeElement(), new FakeElement()),
+    document: new FakeDocument(form, status, showings),
     Intl,
     Date,
     AbortController,
@@ -654,17 +132,280 @@ test('auditorium labels use a short AUD prefix', async () => {
       constructor(label, value) {
         this.label = label;
         this.text = label;
+        this.textContent = label;
         this.value = value;
       }
     },
-    fetch() {
-      return new Promise(() => {});
-    }
+    fetch: fetchImpl
   };
 
   vm.runInNewContext(await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), context);
+  return { form, city, date, threshold, anyOccupied, cineplex, movie, status, showings, context };
+}
+
+function flush() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function jsonResponse(body, ok = true) {
+  return Promise.resolve({
+    ok,
+    async json() {
+      return body;
+    }
+  });
+}
+
+const citiesBody = {
+  defaultCity: 'ottawa',
+  cities: [
+    { slug: 'ottawa', label: 'Ottawa' },
+    { slug: 'toronto', label: 'Toronto' }
+  ]
+};
+
+function showing(overrides = {}) {
+  return {
+    theatreId: '7247',
+    showtimeId: '1001',
+    theatreName: 'Cineplex Cinemas Ottawa',
+    city: 'Ottawa',
+    movieTitle: 'Quiet Movie',
+    startLocal: '2026-05-23T19:00:00',
+    auditorium: '1',
+    experienceTypes: ['Regular'],
+    occupiedCount: 0,
+    totalSeats: 100,
+    ...overrides
+  };
+}
+
+test('city selection is not reset when async city options finish loading', async () => {
+  let resolveFetch;
+  const fetchPromise = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+
+  const harness = await boot(() => fetchPromise);
+  harness.city.value = 'toronto';
+  harness.city.dispatch('change');
+
+  resolveFetch({
+    ok: true,
+    async json() {
+      return citiesBody;
+    }
+  });
+  await flush();
+
+  assert.equal(harness.city.value, 'toronto');
+});
+
+test('page load scans screenings automatically', async () => {
+  const requestedUrls = [];
+  const harness = await boot((url) => {
+    requestedUrls.push(String(url));
+    if (String(url) === 'api/cities') {
+      return jsonResponse(citiesBody);
+    }
+    return jsonResponse({ showings: [showing()] });
+  });
+
+  await flush();
+
+  assert.equal(requestedUrls[0], 'api/cities');
+  assert.ok(requestedUrls.some((url) => url.startsWith('api/showings?city=ottawa&')));
+  assert.ok(harness.cineplex.options.some((option) => option.value === 'Cineplex Odeon Barrhaven Cinemas'));
+  assert.ok(harness.movie.options.some((option) => option.value === 'Quiet Movie'));
+});
+
+test('changing city scans automatically and aborts the previous load', async () => {
+  const requests = [];
+  const harness = await boot((url, options = {}) => {
+    requests.push({ url: String(url), signal: options.signal });
+    if (String(url) === 'api/cities') {
+      return jsonResponse(citiesBody);
+    }
+    return new Promise(() => {});
+  });
+
+  await flush();
+  const firstScan = requests.find((request) => request.url.startsWith('api/showings?city=ottawa&'));
+  assert.ok(firstScan);
+
+  harness.city.value = 'toronto';
+  harness.city.dispatch('change');
+  await flush();
+
+  assert.ok(requests.some((request) => request.url.startsWith('api/showings?city=toronto&')));
+  assert.equal(firstScan.signal.aborted, true);
+});
+
+test('skeleton rows render while a scan is loading', async () => {
+  const harness = await boot((url) => {
+    if (String(url) === 'api/cities') {
+      return jsonResponse(citiesBody);
+    }
+    return new Promise(() => {});
+  });
+
+  await flush();
+
+  assert.equal(harness.status.textContent, 'Scanning...');
+  const skeletons = harness.showings.children[0].children;
+  assert.equal(skeletons.length, 6);
+  assert.ok(skeletons.every((row) => row.className.includes('showing-row--skeleton')));
+});
+
+test('manual refresh forces a fresh scan past the response cache', async () => {
+  const requestedUrls = [];
+  const harness = await boot((url) => {
+    requestedUrls.push(String(url));
+    if (String(url) === 'api/cities') {
+      return jsonResponse(citiesBody);
+    }
+    return jsonResponse({ showings: [] });
+  });
+
+  await flush();
+  harness.form.dispatch('submit');
+  await flush();
+
+  assert.equal(requestedUrls.filter((url) => url.startsWith('api/showings?city=ottawa&')).length, 2);
+});
+
+test('any occupied toggle shows screenings above the max occupied value', async () => {
+  const harness = await boot((url) => {
+    if (String(url) === 'api/cities') {
+      return jsonResponse({ defaultCity: 'ottawa', cities: [{ slug: 'ottawa', label: 'Ottawa' }] });
+    }
+    return jsonResponse({
+      showings: [
+        showing({ movieTitle: 'Empty Movie', occupiedCount: 0 }),
+        showing({ showtimeId: '1002', movieTitle: 'Busy Movie', startLocal: '2026-05-23T21:00:00', auditorium: '2', occupiedCount: 8 })
+      ]
+    });
+  });
+  harness.threshold.value = '0';
+
+  await flush();
+  assert.equal(harness.status.textContent, '1 found across 1 Cineplex theatres');
+
+  harness.anyOccupied.checked = true;
+  harness.anyOccupied.dispatch('change');
+  assert.equal(harness.status.textContent, '2 found across 1 Cineplex theatres');
+});
+
+test('failed load keeps previous results and shows an error card', async () => {
+  let failShowings = false;
+  const harness = await boot((url) => {
+    if (String(url) === 'api/cities') {
+      return jsonResponse({ defaultCity: 'ottawa', cities: [{ slug: 'ottawa', label: 'Ottawa' }] });
+    }
+    if (failShowings) {
+      return jsonResponse({ error: 'Cineplex data could not be reached' }, false);
+    }
+    return jsonResponse({ showings: [showing()] });
+  });
+
+  await flush();
+  assert.equal(harness.movie.disabled, false);
+  assert.equal(harness.movie.options.some((option) => option.value === 'Quiet Movie'), true);
+
+  failShowings = true;
+  harness.date.value = '2026-05-24';
+  harness.date.dispatch('change');
+  await flush();
+
+  assert.equal(harness.status.textContent, 'Error loading new scan');
+  assert.equal(harness.movie.disabled, false);
+  assert.equal(harness.movie.options.some((option) => option.value === 'Quiet Movie'), true);
+  assert.equal(harness.showings.children[0].children[0].className, 'empty-state empty-state--error');
+});
+
+test('clicking a showing toggles its seat map panel', async () => {
+  const requestedUrls = [];
+  const harness = await boot((url) => {
+    requestedUrls.push(String(url));
+    if (String(url) === 'api/cities') {
+      return jsonResponse({ defaultCity: 'ottawa', cities: [{ slug: 'ottawa', label: 'Ottawa' }] });
+    }
+    if (String(url).startsWith('api/seatmap/')) {
+      return jsonResponse({
+        theatreId: '7247',
+        showtimeId: '1001',
+        areas: [
+          {
+            name: 'standardSeats',
+            totalColumns: 2,
+            rows: [
+              {
+                label: 'A',
+                seats: [
+                  { id: 'A1', label: '1', column: 1, status: 'Available' },
+                  { id: 'A2', label: '2', column: 2, status: 'Occupied' }
+                ]
+              }
+            ]
+          }
+        ]
+      });
+    }
+    return jsonResponse({
+      showings: [
+        showing(),
+        showing({ showtimeId: '1002', movieTitle: 'Other Movie', startLocal: '2026-05-23T21:00:00' })
+      ]
+    });
+  });
+
+  await flush();
+  const fragment = harness.showings.children[0];
+  const list = fragment.children[0].children[1];
+  const [firstRow, secondRow] = list.children;
+
+  firstRow.dispatch('click');
+  await flush();
+
+  assert.ok(requestedUrls.includes('api/seatmap/7247/1001'));
+  assert.equal(firstRow.attributes.get('aria-expanded'), 'true');
+  const panel = list.children[1];
+  assert.equal(panel.className, 'seatmap-panel');
+  assert.equal(panel.children[0].className, 'seatmap-screen');
+  assert.equal(panel.children.at(-1).className, 'seatmap-legend');
+  const seatRow = panel.children[1].children[0];
+  assert.equal(seatRow.children[1].className, 'seat seat--available');
+  assert.equal(seatRow.children[1].style.gridColumnStart, 2);
+  assert.equal(seatRow.children[2].className, 'seat seat--occupied');
+
+  secondRow.dispatch('click');
+  await flush();
+
+  assert.ok(requestedUrls.includes('api/seatmap/7247/1002'));
+  assert.equal(firstRow.attributes.get('aria-expanded'), 'false');
+  assert.equal(list.children.filter((child) => child.className === 'seatmap-panel').length, 1);
+  assert.equal(list.children[2].className, 'seatmap-panel');
+
+  secondRow.dispatch('click');
+  assert.equal(list.children.filter((child) => child.className === 'seatmap-panel').length, 0);
+  assert.equal(secondRow.attributes.get('aria-expanded'), 'false');
+});
+
+test('pure formatting helpers', async () => {
+  const harness = await boot(() => new Promise(() => {}));
+  const { context } = harness;
 
   assert.equal(context.formatAuditorium('7'), 'AUD 7');
   assert.equal(context.formatAuditorium('Auditorium 12'), 'AUD 12');
   assert.equal(context.formatAuditorium('Aud 4'), 'AUD 4');
+
+  assert.equal(context.formatAge(30_000), '30s ago');
+  assert.equal(context.formatAge(300_000), '5m ago');
+
+  assert.equal(context.seatmapAreaLabel('standardSeats'), 'Standard');
+  assert.equal(context.seatmapAreaLabel('dboxSeats'), 'D-BOX');
+  assert.equal(context.seatmapAreaLabel('balconySeats'), 'Balcony');
+
+  assert.equal(context.seatColumnStart({ column: 3 }, 1), 4);
+  assert.equal(context.seatColumnStart({ column: 0 }, 0), 2);
 });

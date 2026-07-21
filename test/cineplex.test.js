@@ -41,6 +41,29 @@ test('Cineplex client discovers the public browser API key when no override is p
   assert.equal(requests.at(-1).headers['ocp-apim-subscription-key'], 'public-browser-key');
 });
 
+test('Cineplex client retries key discovery after a failed attempt', async () => {
+  let failDiscovery = true;
+  const fetchImpl = async (url) => {
+    if (String(url) === 'https://www.cineplex.com/') {
+      if (failDiscovery) {
+        return new Response('unavailable', { status: 503 });
+      }
+      return new Response('headers:{"ocp-apim-subscription-key":"recovered-key"}', {
+        headers: { 'content-type': 'text/html' }
+      });
+    }
+
+    return jsonResponse({ seatAvailabilities: {} });
+  };
+
+  const client = createCineplexClient({ fetchImpl, apiKey: undefined });
+  await assert.rejects(() => client.getSeatAvailability('7247', '1001'));
+
+  failDiscovery = false;
+  const availability = await client.getSeatAvailability('7247', '1001');
+  assert.deepEqual(availability, { seatAvailabilities: {} });
+});
+
 test('Cineplex client sends selected city location to theatre discovery', async () => {
   const requests = [];
   const fetchImpl = async (url) => {

@@ -89,12 +89,13 @@ const defaultCineplexTheatresByCity = {
 
 let allShowings = [];
 let loadController = null;
-let dataStale = true;
-let primaryFilterChanged = false;
 let lastLoadError = null;
-let unavailableStaticScan = null;
-let availableStaticScans = null;
+let loadedScanKey = null;
+let lastLoadedAt = null;
+let statusBase = '';
+let openSeatmap = null;
 const showingsResponseCache = new Map();
+const seatmapResponseCache = new Map();
 
 dateInput.value = todayLocal();
 replaceOptions(cityInput, '', defaultCities.map(([slug, label]) => ({ value: slug, label })));
@@ -105,18 +106,24 @@ form.addEventListener('submit', (event) => {
   loadShowings({ force: true });
 });
 
-cityInput.addEventListener('change', markSelectedScanChanged);
-dateInput.addEventListener('change', markSelectedScanChanged);
+cityInput.addEventListener('change', () => loadShowings());
+dateInput.addEventListener('change', () => loadShowings());
 thresholdInput.addEventListener('input', applyFilters);
 anyOccupiedInput.addEventListener('change', applyFilters);
 cineplexInput.addEventListener('change', applyFilters);
 movieInput.addEventListener('change', applyFilters);
 
-loadCities().finally(() => {
-  if (!primaryFilterChanged) {
-    markNeedsRefresh();
+document.addEventListener?.('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && lastLoadedAt && Date.now() - lastLoadedAt > SHOWINGS_CACHE_TTL_MS && !loadController) {
+    loadShowings();
   }
 });
+
+if (typeof setInterval === 'function') {
+  setInterval(refreshStatusAge, 30_000);
+}
+
+loadCities().finally(() => loadShowings());
 
 async function loadCities() {
   try {
@@ -126,39 +133,24 @@ async function loadCities() {
     cityInput.value = hasOption(cityInput, selectedCity) ? selectedCity : body.defaultCity || 'ottawa';
     updateFilterOptions(allShowings);
   } catch {
-    await loadStaticCities();
+    // The default city list is already rendered.
   }
-}
-
-async function loadStaticCities() {
-  try {
-    const body = await fetchJson('data/index.json');
-    setStaticScanAvailability(body.dates || []);
-    const citySlugs = sortedValues(new Set([
-      ...defaultCities.map(([slug]) => slug),
-      ...(body.dates || []).map((entry) => entry.city).filter(Boolean)
-    ]));
-    if (citySlugs.length > 0) {
-      const selectedCity = cityInput.value;
-      replaceOptions(cityInput, '', citySlugs.map((slug) => ({ value: slug, label: defaultCityLabels.get(slug) || slug })));
-      cityInput.value = hasOption(cityInput, selectedCity) ? selectedCity : 'ottawa';
-    }
-  } catch {
-    // The default city list is already rendered in the HTML/JS fallback.
-  }
-
-  cityInput.value = hasOption(cityInput, cityInput.value) ? cityInput.value : hasOption(cityInput, 'ottawa') ? 'ottawa' : cityInput.options[0]?.value || 'ottawa';
-  updateFilterOptions(allShowings);
 }
 
 async function loadShowings({ force = false } = {}) {
   loadController?.abort();
   loadController = new AbortController();
   const { signal } = loadController;
+  const scanKey = `${cityInput.value}:${dateInput.value}`;
 
   form.classList.add('is-loading');
   showingsEl.setAttribute('aria-busy', 'true');
-  statusEl.textContent = allShowings.length === 0 ? 'Loading...' : 'Refreshing...';
+  if (scanKey === loadedScanKey && allShowings.length > 0) {
+    setStatus('Refreshing...');
+  } else {
+    setStatus('Scanning...');
+    renderSkeletons();
+  }
 
   try {
     const body = await fetchShowings(cityInput.value, dateInput.value, signal, { force });
@@ -167,9 +159,9 @@ async function loadShowings({ force = false } = {}) {
     }
 
     allShowings = prepareShowings(body.showings || []);
-    dataStale = false;
+    loadedScanKey = scanKey;
+    lastLoadedAt = Date.now();
     lastLoadError = null;
-    unavailableStaticScan = null;
     updateFilterOptions(allShowings);
     applyFilters();
   } catch (error) {
@@ -177,19 +169,7 @@ async function loadShowings({ force = false } = {}) {
       return;
     }
 
-    if (error.name === 'StaticScanUnavailableError') {
-      allShowings = [];
-      dataStale = true;
-      lastLoadError = null;
-      unavailableStaticScan = error;
-      updateFilterOptions([]);
-      applyFilters();
-      return;
-    }
-
-    dataStale = allShowings.length > 0;
     lastLoadError = error;
-    unavailableStaticScan = null;
     updateFilterOptions(allShowings);
     applyFilters();
   } finally {
@@ -201,26 +181,6 @@ async function loadShowings({ force = false } = {}) {
   }
 }
 
-function markSelectedScanChanged() {
-  primaryFilterChanged = true;
-  markNeedsRefresh();
-}
-
-function markNeedsRefresh() {
-  loadController?.abort();
-  dataStale = true;
-  lastLoadError = null;
-  unavailableStaticScan = null;
-
-  if (allShowings.length > 0) {
-    applyFilters();
-    return;
-  }
-
-  statusEl.textContent = 'Ready to scan';
-  showingsEl.replaceChildren(emptyState('Choose a scan', 'Pick a city and date, then refresh the screenings.', { plain: true }));
-}
-
 async function fetchShowings(city, date, signal, { force = false } = {}) {
   const cacheKey = `${city}:${date}`;
   const cached = showingsResponseCache.get(cacheKey);
@@ -228,28 +188,8 @@ async function fetchShowings(city, date, signal, { force = false } = {}) {
     return cached.body;
   }
 
-  if (availableStaticScans) {
-    if (!hasStaticScan(city, date)) {
-      throw new StaticScanUnavailableError(city, date);
-    }
-
-    return cacheShowingsResponse(cacheKey, await fetchJson(`data/showings-${city}-${date}.json`, signal));
-  }
-
   const params = new URLSearchParams({ city, date, all: '1' });
-
-  try {
-    return cacheShowingsResponse(cacheKey, await fetchJson(`api/showings?${params}`, signal));
-  } catch (apiError) {
-    try {
-      return cacheShowingsResponse(cacheKey, await fetchJson(`data/showings-${city}-${date}.json`, signal));
-    } catch {
-      throw apiError;
-    }
-  }
-}
-
-function cacheShowingsResponse(cacheKey, body) {
+  const body = await fetchJson(`api/showings?${params}`, signal);
   showingsResponseCache.set(cacheKey, { body, expiresAt: Date.now() + SHOWINGS_CACHE_TTL_MS });
   return body;
 }
@@ -324,24 +264,14 @@ function updateFilterOptions(showings) {
 }
 
 function renderShowings(showings, { filtered = false } = {}) {
+  closeSeatmap();
   const theatreGroups = groupByTheatre(showings);
   const groupCount = theatreGroups.length;
   const errorAlert = lastLoadError ? errorState(lastLoadError, { stale: allShowings.length > 0 }) : null;
-  if (unavailableStaticScan) {
-    statusEl.textContent = 'No saved scan for selected date';
-  } else if (lastLoadError) {
-    statusEl.textContent = allShowings.length === 0 ? 'Error loading screenings' : 'Error loading new scan';
-  } else if (dataStale) {
-    statusEl.textContent = allShowings.length === 0
-      ? 'Press Refresh to load screenings'
-      : `${showings.length} shown from previous results. Press Refresh for selected city/date.`;
+  if (lastLoadError) {
+    setStatus(allShowings.length === 0 ? 'Error loading screenings' : 'Error loading new scan');
   } else {
-    statusEl.textContent = `${showings.length} found${filtered ? ' after filters' : ` across ${groupCount} Cineplex theatres`}`;
-  }
-
-  if (unavailableStaticScan) {
-    showingsEl.replaceChildren(unavailableStaticScanState());
-    return;
+    setStatus(`${showings.length} found${filtered ? ' after filters' : ` across ${groupCount} Cineplex theatres`}`);
   }
 
   if (showings.length === 0) {
@@ -376,11 +306,48 @@ function renderShowings(showings, { filtered = false } = {}) {
   showingsEl.replaceChildren(fragment);
 }
 
-function emptyResultsMessage({ filtered }) {
-  if (dataStale) {
-    return emptyState('Choose a scan', 'Pick a city and date, then refresh the screenings.', { plain: true });
+function renderSkeletons() {
+  const fragment = document.createDocumentFragment();
+  for (let index = 0; index < 6; index += 1) {
+    const row = document.createElement('article');
+    row.className = 'showing-row showing-row--skeleton';
+    for (let block = 0; block < 3; block += 1) {
+      const shimmer = document.createElement('div');
+      shimmer.className = 'skeleton-block';
+      row.append(shimmer);
+    }
+    fragment.append(row);
   }
 
+  showingsEl.replaceChildren(fragment);
+}
+
+function setStatus(text) {
+  statusBase = text;
+  statusEl.textContent = text;
+}
+
+function refreshStatusAge() {
+  if (loadController || !lastLoadedAt || lastLoadError) {
+    return;
+  }
+
+  const age = Date.now() - lastLoadedAt;
+  if (age >= 45_000) {
+    statusEl.textContent = `${statusBase} · updated ${formatAge(age)}`;
+  }
+}
+
+function formatAge(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 90) {
+    return `${seconds}s ago`;
+  }
+
+  return `${Math.round(seconds / 60)}m ago`;
+}
+
+function emptyResultsMessage({ filtered }) {
   if (allShowings.length === 0) {
     return emptyState('No screenings found', `No reserved-seat Cineplex screenings were found for ${selectedCityLabel()} on ${displayDate(dateInput.value)}.`);
   }
@@ -456,7 +423,201 @@ function showingRow(showing, animationDelay) {
   seats.append(occupied, total);
 
   row.append(time, movie, seats);
+
+  if (showing.theatreId && showing.showtimeId) {
+    const chevron = document.createElement('span');
+    chevron.className = 'row-chevron';
+    chevron.textContent = '▾';
+    row.append(chevron);
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+    row.setAttribute('aria-expanded', 'false');
+    row.addEventListener('click', () => toggleSeatmap(showing, row));
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        toggleSeatmap(showing, row);
+      }
+    });
+  }
+
   return row;
+}
+
+function toggleSeatmap(showing, row) {
+  const key = `${showing.theatreId}:${showing.showtimeId}`;
+  if (openSeatmap?.key === key) {
+    closeSeatmap();
+    return;
+  }
+
+  closeSeatmap();
+
+  const panel = document.createElement('article');
+  panel.className = 'seatmap-panel';
+  const controller = new AbortController();
+  openSeatmap = { key, row, panel, controller };
+  row.setAttribute('aria-expanded', 'true');
+  row.classList.add('is-open');
+  row.after(panel);
+  loadSeatmapPanel(showing, panel, controller.signal);
+}
+
+function closeSeatmap() {
+  if (!openSeatmap) {
+    return;
+  }
+
+  openSeatmap.controller.abort();
+  openSeatmap.panel.remove();
+  openSeatmap.row.setAttribute('aria-expanded', 'false');
+  openSeatmap.row.classList.remove('is-open');
+  openSeatmap = null;
+}
+
+async function loadSeatmapPanel(showing, panel, signal) {
+  const key = `${showing.theatreId}:${showing.showtimeId}`;
+  const message = document.createElement('p');
+  message.className = 'seatmap-message';
+  message.textContent = 'Loading seat map...';
+  panel.replaceChildren(message);
+
+  let seatmap = null;
+  const cached = seatmapResponseCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    seatmap = cached.body;
+  } else {
+    try {
+      seatmap = await fetchJson(`api/seatmap/${encodeURIComponent(showing.theatreId)}/${encodeURIComponent(showing.showtimeId)}`, signal);
+      seatmapResponseCache.set(key, { body: seatmap, expiresAt: Date.now() + SHOWINGS_CACHE_TTL_MS });
+    } catch (error) {
+      if (error.name === 'AbortError' || signal.aborted) {
+        return;
+      }
+
+      renderSeatmapError(showing, panel, signal);
+      return;
+    }
+  }
+
+  if (signal.aborted) {
+    return;
+  }
+
+  renderSeatmap(panel, seatmap);
+}
+
+function renderSeatmapError(showing, panel, signal) {
+  const message = document.createElement('p');
+  message.className = 'seatmap-message';
+  message.textContent = 'Could not load the seat map.';
+
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'seatmap-retry';
+  retry.textContent = 'Try again';
+  retry.addEventListener('click', () => loadSeatmapPanel(showing, panel, signal));
+
+  panel.replaceChildren(message, retry);
+}
+
+function renderSeatmap(panel, seatmap) {
+  const screen = document.createElement('div');
+  screen.className = 'seatmap-screen';
+  screen.textContent = 'SCREEN';
+
+  const areas = (seatmap.areas || []).map((area) => seatmapAreaEl(area, seatmap.areas.length > 1));
+  panel.replaceChildren(screen, ...areas, seatmapLegend());
+}
+
+function seatmapAreaEl(area, showLabel) {
+  const element = document.createElement('div');
+  element.className = 'seat-area';
+
+  if (showLabel) {
+    const heading = document.createElement('h3');
+    heading.textContent = seatmapAreaLabel(area.name);
+    element.append(heading);
+  }
+
+  // Cineplex often reports totalColumns as 0, so measure the real column span.
+  const { minColumn, columnCount } = areaColumnRange(area);
+  for (const row of area.rows || []) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'seat-row';
+    rowEl.style.gridTemplateColumns = `24px repeat(${columnCount}, minmax(12px, 1fr))`;
+
+    const label = document.createElement('span');
+    label.className = 'row-label';
+    label.textContent = row.label;
+    rowEl.append(label);
+
+    for (const seat of row.seats || []) {
+      const seatEl = document.createElement('span');
+      seatEl.className = `seat seat--${seatStatusClass(seat.status)}`;
+      seatEl.style.gridColumnStart = seatColumnStart(seat, minColumn);
+      seatEl.title = `${seat.label || row.label} · ${seat.status}`;
+      rowEl.append(seatEl);
+    }
+
+    element.append(rowEl);
+  }
+
+  return element;
+}
+
+function areaColumnRange(area) {
+  let minColumn = Infinity;
+  let maxColumn = -Infinity;
+  for (const row of area.rows || []) {
+    for (const seat of row.seats || []) {
+      if (Number.isFinite(seat.column)) {
+        minColumn = Math.min(minColumn, seat.column);
+        maxColumn = Math.max(maxColumn, seat.column);
+      }
+    }
+  }
+
+  if (!Number.isFinite(minColumn)) {
+    return { minColumn: 0, columnCount: Math.max(1, area.totalColumns || 1) };
+  }
+
+  return { minColumn, columnCount: maxColumn - minColumn + 1 };
+}
+
+function seatColumnStart(seat, minColumn) {
+  return (Number.isFinite(seat.column) ? seat.column - minColumn : 0) + 2;
+}
+
+function seatStatusClass(status) {
+  if (status === 'Available') return 'available';
+  if (status === 'Occupied') return 'occupied';
+  return 'unknown';
+}
+
+function seatmapAreaLabel(name) {
+  if (name === 'standardSeats') return 'Standard';
+  if (name === 'dboxSeats') return 'D-BOX';
+  if (name === 'balconySeats') return 'Balcony';
+  return name;
+}
+
+function seatmapLegend() {
+  const legend = document.createElement('div');
+  legend.className = 'seatmap-legend';
+
+  for (const [statusClass, label] of [['available', 'Available'], ['occupied', 'Occupied'], ['unknown', 'Unknown']]) {
+    const item = document.createElement('span');
+    item.className = 'seatmap-legend-item';
+    const swatch = document.createElement('span');
+    swatch.className = `seat seat--${statusClass}`;
+    const text = document.createElement('span');
+    text.textContent = label;
+    item.append(swatch, text);
+    legend.append(item);
+  }
+
+  return legend;
 }
 
 function formatTime(value) {
@@ -492,7 +653,7 @@ function emptyState(title, message, { plain = false } = {}) {
 
 function errorState(error, { stale }) {
   const message = stale
-    ? `An error occurred while loading ${selectedCityLabel()} on ${displayDate(dateInput.value)}, so these are the previous results. Try Refresh again in a moment.`
+    ? `An error occurred while loading ${selectedCityLabel()} on ${displayDate(dateInput.value)}, so these are the previous results. Try again in a moment.`
     : `An error occurred while loading ${selectedCityLabel()} on ${displayDate(dateInput.value)}. ${friendlyLoadError(error)}`;
   const element = emptyState('Could not load screenings', message);
   element.className = 'empty-state empty-state--error';
@@ -500,79 +661,17 @@ function errorState(error, { stale }) {
   return element;
 }
 
-function unavailableStaticScanState() {
-  const dateRange = staticDateRangeLabel();
-  const message = dateRange
-    ? `The deployed site has saved scans from ${dateRange}. Pick an available date, then press Refresh.`
-    : 'The deployed site has not generated this saved scan yet. Pick another date, then press Refresh.';
-
-  return emptyState('No saved scan for this date yet', message);
-}
-
 function withErrorAlert(errorAlert, element) {
   return errorAlert ? [errorAlert, element] : [element];
 }
 
-function setStaticScanAvailability(entries) {
-  availableStaticScans = new Map();
-  const dates = [];
-
-  for (const entry of entries) {
-    if (!entry?.city || !entry?.date) {
-      continue;
-    }
-
-    if (!availableStaticScans.has(entry.city)) {
-      availableStaticScans.set(entry.city, new Set());
-    }
-
-    availableStaticScans.get(entry.city).add(entry.date);
-    dates.push(entry.date);
-  }
-
-  if (dates.length === 0) {
-    return;
-  }
-
-  dates.sort();
-  dateInput.min = dates[0];
-  dateInput.max = dates[dates.length - 1];
-
-  if (!dateInput.value || dateInput.value < dateInput.min || dateInput.value > dateInput.max) {
-    dateInput.value = dateInput.min;
-  }
-}
-
-function hasStaticScan(city, date) {
-  return availableStaticScans?.get(city)?.has(date) === true;
-}
-
-function staticDateRangeLabel() {
-  if (!dateInput.min || !dateInput.max) {
-    return '';
-  }
-
-  if (dateInput.min === dateInput.max) {
-    return displayDate(dateInput.min);
-  }
-
-  return `${displayDate(dateInput.min)} to ${displayDate(dateInput.max)}`;
-}
-
-class StaticScanUnavailableError extends Error {
-  constructor(city, date) {
-    super(`No saved scan is available for ${city} on ${date}`);
-    this.name = 'StaticScanUnavailableError';
-  }
-}
-
 function friendlyLoadError(error) {
   const message = String(error?.message || '');
-  if (message.includes('api/showings') || message.includes('data/showings')) {
-    return `No saved scan is available for ${selectedCityLabel()} on ${displayDate(dateInput.value)} yet. Try another city or date.`;
+  if (message.includes('api/showings')) {
+    return `No scan is available for ${selectedCityLabel()} on ${displayDate(dateInput.value)} yet. Try another city or date.`;
   }
 
-  return 'Cineplex data could not be reached. Wait a moment and scan again.';
+  return 'Cineplex data could not be reached. Wait a moment and try again.';
 }
 
 function selectedCityLabel() {

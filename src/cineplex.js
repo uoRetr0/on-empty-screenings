@@ -84,7 +84,10 @@ export function createCineplexClient({
       return Promise.resolve(apiKey);
     }
 
-    apiKeyPromise ||= discoverCineplexSubscriptionKey({ fetchImpl, websiteUrl });
+    apiKeyPromise ||= discoverCineplexSubscriptionKey({ fetchImpl, websiteUrl }).catch((error) => {
+      apiKeyPromise = undefined;
+      throw error;
+    });
     return apiKeyPromise;
   }
 

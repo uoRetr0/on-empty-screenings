@@ -181,7 +181,7 @@ export function createServer({
   });
 }
 
-async function cached(cache, key, ttlMs, now, load) {
+export async function cached(cache, key, ttlMs, now, load) {
   const currentTime = now();
   const entry = cache.get(key);
   if (entry && (entry.pending || entry.expiresAt > currentTime)) {
@@ -553,7 +553,7 @@ function availabilityMap(value) {
   return statuses;
 }
 
-function parseThreshold(thresholdValue, allValue) {
+export function parseThreshold(thresholdValue, allValue) {
   if (allValue === '1' || allValue === 'true') {
     return Number.MAX_SAFE_INTEGER;
   }
@@ -566,7 +566,7 @@ function todayLocal() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function publicErrorMessage(error) {
+export function publicErrorMessage(error) {
   if (String(error?.message || '').includes('Cineplex')) {
     return 'Cineplex changed or temporarily rejected its public website API. Try again later, or set CINEPLEX_SUBSCRIPTION_KEY if automatic key discovery has stopped working.';
   }
